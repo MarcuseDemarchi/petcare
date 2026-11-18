@@ -96,7 +96,7 @@ A primeira pipeline roda automaticamente e publica a aplicação. Acompanhe em
 | Shell no MongoDB (sem SSH) | `terraform output ssm_session_mongo` |
 
 ### Recuperação de dados
-O volume do MongoDB tem snapshot diário (DLM, retenção de 7 dias). Para restaurar: criar volume a partir
+O volume do MongoDB tem snapshot diário (Lambda agendada pelo EventBridge, retenção de 7 dias; o primeiro é feito no próprio `apply`). Para restaurar: criar volume a partir
 do snapshot no console EC2 e anexá-lo à instância do MongoDB (ou importar com
 `terraform import module.data.aws_ebs_volume.data <vol-id>`).
 

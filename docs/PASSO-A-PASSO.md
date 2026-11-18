@@ -144,10 +144,10 @@ Custo com tudo ligado: **~US$ 5 a 6 por dia** do crédito do Lab. No dia da apre
 | GitLab não abre no navegador | Seu IP mudou: atualize `admin_cidrs` no `terraform.tfvars` e rode `terraform apply` |
 | Bootstrap esperando mais de 25 min | Console AWS → EC2 → instância `petcare-cloud-gitlab` → **Connect → Session Manager** → `sudo tail -50 /var/log/petcare-gitlab-bootstrap.log` |
 | Job `deploy:producao` falhou | Console AWS → **CodeDeploy → Deployments** → abra o deploy → *View events* |
-| Erro de `AccessDenied` em algum recurso | Mande a mensagem completa no grupo. O Learner Lab bloqueia algumas APIs, e o código já contorna as conhecidas (S3 Object Lock, tags do DLM, role do Auto Scaling) |
+| Erro de `AccessDenied` em algum recurso | Mande a mensagem completa no grupo. O Learner Lab bloqueia algumas APIs, e o código já contorna as conhecidas (S3 Object Lock, DLM, role do Auto Scaling) |
 
 ### Limitações do Learner Lab já tratadas no código
 - **Buckets S3:** criados por uma Lambda, porque o Lab nega `s3:GetBucketObjectLockConfiguration`, usado pelo recurso padrão do Terraform.
-- **Snapshots (DLM):** criados sem tags, porque o Lab nega `dlm:TagResource`.
+- **Backup do MongoDB:** o Lab bloqueia o DLM, então o snapshot diário do volume (retenção de 7) é feito por uma Lambda agendada pelo EventBridge.
 - **Auto Scaling:** na primeira vez em uma conta nova, a role de serviço demora alguns segundos para propagar. O Terraform não espera a capacidade, e o ASG tenta de novo sozinho.
 - **IAM:** usa a `LabRole` e o `LabInstanceProfile`, porque o Lab não permite criar roles.

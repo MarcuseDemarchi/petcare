@@ -72,6 +72,6 @@ Outros testes de gate (um por MR): quebrar um teste em `router_test.go`; adicion
 | MongoDB não sobe | SSM no Mongo → `sudo tail -100 /var/log/petcare-mongo-bootstrap.log` |
 | Deploy falha | Console CodeDeploy → Deployment → View events; na EC2: `/var/log/aws/codedeploy-agent/codedeploy-agent.log` |
 | API com erro | SSM na EC2 app → `sudo journalctl -u petcare-backend -n 100` |
-| `AccessDenied` no apply (DLM) | `enable_mongo_snapshots = false` no `terraform.tfvars` |
+| Ver backups do MongoDB | Console EC2 → **Snapshots** (tag `CreatedBy = petcare-cloud-backup`) |
 | Job de deploy sem permissão AWS | Instance Profile `LabInstanceProfile` anexado à EC2 do GitLab? |
 | Sessão do Lab expirou | Reinicie o Lab, recopie credenciais; EC2 voltam sozinhas (GitLab ~5 min) |

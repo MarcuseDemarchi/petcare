@@ -16,7 +16,7 @@ na arquitetura atual. Cada controle é **verificável** (código, pipeline ou te
 | A7 | Sem WAF / sem balanceador | Alta | ALB + AWS WAF: rate limit, IP reputation, OWASP Common (XSS), SQLi, Log4j, bloqueio de `/.git` `/.env` | `modules/edge` · job `verify:producao` (SQLi → 403) |
 | A8 | Sem pipeline; deploy manual por `kubectl` | Média | GitLab CI/CD com gate de testes e segurança; deploy só da `main` protegida | `.gitlab-ci.yml` |
 | A9 | Sem trilha de auditoria de rede/acesso | Média | VPC Flow Logs, ALB access logs e WAF logs em S3 (criptografados, TLS obrigatório, retenção 90 dias) | `main.tf`, `modules/edge` |
-| A10 | Sem backup do banco | Média | Snapshots diários do EBS (DLM, 7 dias) + IaC para recriar o ambiente (DR) | `modules/data` · README (runbook) |
+| A10 | Sem backup do banco | Média | Snapshots diários do EBS (Lambda + EventBridge, retenção de 7) + IaC para recriar o ambiente (DR) | `modules/data` · README (runbook) |
 | A11 | Segredos do banco em `k8s/02-secrets.yaml` (base64) | Média | Senhas geradas pelo Terraform, armazenadas como `SecureString` no SSM, lidas em tempo de deploy | `after_install.sh` |
 | A12 | Containers rodando como root | Baixa | Dockerfiles com usuário não-root; API em systemd com hardening (`NoNewPrivileges`, `ProtectSystem=strict`) | `petcare-backend.service` |
 | A13 | Sem cabeçalhos de segurança HTTP | Baixa | `X-Frame-Options`, `X-Content-Type-Options`, `CSP`, `Referrer-Policy`, `server_tokens off` | `deploy/config/nginx.conf` · `middleware/security.go` |
@@ -40,7 +40,7 @@ Na pipeline, o Gitleaks bloqueia segredos na árvore atual e em **qualquer commi
 | Gitleaks 8.30 | Árvore atual + commits novos | 0 vazamentos |
 | Trivy 0.76 (SCA) | `go.mod`, `package-lock.json` | 0 CVEs altas/críticas |
 | Trivy 0.76 (pacote) | binário Go + frontend publicado | 0 CVEs altas/críticas, 0 segredos |
-| Checkov 3.4 | Terraform | 216 aprovadas · 0 falhas · 50 exceções justificadas |
+| Checkov 3.4 | Terraform | 204 aprovadas · 0 falhas · 49 exceções justificadas |
 | `go test` | API | 6 funções de teste (validação de entrada, NoSQL injection, health checks, headers) |
 
 ## 3. Riscos aceitos (exceções justificadas)
