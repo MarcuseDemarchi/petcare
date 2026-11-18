@@ -12,6 +12,8 @@
 *.tfvars
 !*.tfvars.example
 crash.log
+tfplan
+*.tfplan
 terraform/.build/
 
 # Build
