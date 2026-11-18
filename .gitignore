@@ -1,0 +1,27 @@
+# Segredos e chaves - nunca versionar
+*.pem
+*.key
+*.p12
+.env
+.env.*
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+terraform/.build/
+
+# Build
+petcare/frontend/node_modules/
+petcare/frontend/dist/
+petcare/backend/petcare-backend
+dist/
+*.zip
+
+# Imagens soltas da raiz (diagramas ficam em docs/)
+/image.png
+/image2.png
+.build/
