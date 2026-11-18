@@ -146,6 +146,7 @@ resource "aws_volume_attachment" "data" {
 
 # ------------------------------------------------------------------ Backup (DR)
 resource "aws_dlm_lifecycle_policy" "mongo" {
+  provider           = aws.notags # Learner Lab nega dlm:TagResource
   count              = var.enable_snapshots ? 1 : 0
   description        = "Snapshots diarios do volume do MongoDB"
   execution_role_arn = var.lab_role_arn

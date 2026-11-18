@@ -66,6 +66,9 @@ resource "aws_autoscaling_group" "app" {
   health_check_type         = "ELB"
   health_check_grace_period = 600
   default_instance_warmup   = 120
+  # Não bloqueia o apply aguardando instâncias: em conta nova, a role de serviço do
+  # Auto Scaling é criada no 1º uso e leva alguns segundos para propagar (o ASG tenta de novo).
+  wait_for_capacity_timeout = "0"
 
   launch_template {
     id      = aws_launch_template.app.id
