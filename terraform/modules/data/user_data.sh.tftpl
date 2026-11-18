@@ -1,0 +1,56 @@
+#!/bin/bash
+# Bootstrap do MongoDB (Amazon Linux 2023) em sub-rede SEM acesso à internet.
+# Pacotes: S3 (gateway endpoint). Segredos: SSM Parameter Store (interface endpoint).
+set -euo pipefail
+exec > >(tee /var/log/petcare-mongo-bootstrap.log) 2>&1
+REGION=${aws_region}
+
+# 1) Volume de dados dedicado (EBS criptografado, alvo dos snapshots)
+DEV=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_serial}
+for i in $(seq 1 60); do [ -e "$DEV" ] && break; sleep 5; done
+if ! blkid "$DEV"; then mkfs.xfs "$DEV"; fi
+mkdir -p /var/lib/mongo
+grep -q /var/lib/mongo /etc/fstab || echo "$DEV /var/lib/mongo xfs defaults,nofail 0 2" >> /etc/fstab
+mount -a
+
+# 2) Instala MongoDB a partir do espelho no S3 (dependências vêm do repo AL2023 via S3)
+if ! command -v mongod >/dev/null; then
+  mkdir -p /tmp/rpms
+  aws s3 cp --region "$REGION" s3://${bucket}/${server_key} /tmp/rpms/
+  aws s3 cp --region "$REGION" s3://${bucket}/${mongosh_key} /tmp/rpms/
+  dnf install -y /tmp/rpms/*.rpm
+fi
+chown -R mongod:mongod /var/lib/mongo
+
+# 3) Segredos do SSM (nunca no user_data / Git)
+ADMIN_PW=$(aws ssm get-parameter --region "$REGION" --name "${ssm_prefix}/mongo/admin_password" --with-decryption --query Parameter.Value --output text)
+APP_PW=$(aws ssm get-parameter --region "$REGION" --name "${ssm_prefix}/mongo/app_password" --with-decryption --query Parameter.Value --output text)
+
+# 4) Primeira inicialização sem autenticação, apenas em localhost, para criar usuários
+if [ ! -f /var/lib/mongo/.petcare-init ]; then
+  cat > /etc/mongod.conf <<CONF
+storage: { dbPath: /var/lib/mongo }
+systemLog: { destination: file, path: /var/log/mongodb/mongod.log, logAppend: true }
+net: { port: 27017, bindIp: 127.0.0.1 }
+processManagement: { timeZoneInfo: /usr/share/zoneinfo }
+CONF
+  systemctl restart mongod
+  for i in $(seq 1 30); do mongosh --quiet --eval 'db.adminCommand({ping:1})' && break; sleep 2; done
+  mongosh --quiet admin <<JS
+db.createUser({user: "admin", pwd: "$ADMIN_PW", roles: [{role: "root", db: "admin"}]});
+db.getSiblingDB("petcare").createUser({user: "petcare_app", pwd: "$APP_PW", roles: [{role: "readWrite", db: "petcare"}]});
+JS
+  touch /var/lib/mongo/.petcare-init
+fi
+
+# 5) Configuração definitiva: autenticação obrigatória, escuta na VPC
+cat > /etc/mongod.conf <<CONF
+storage: { dbPath: /var/lib/mongo }
+systemLog: { destination: file, path: /var/log/mongodb/mongod.log, logAppend: true }
+net: { port: 27017, bindIp: 0.0.0.0 }
+security: { authorization: enabled }
+processManagement: { timeZoneInfo: /usr/share/zoneinfo }
+CONF
+systemctl enable mongod
+systemctl restart mongod
+echo "MongoDB pronto"

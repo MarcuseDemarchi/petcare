@@ -1,0 +1,15 @@
+variable "name" { type = string }
+variable "ami_id" { type = string }
+variable "instance_type" { type = string }
+variable "instance_profile_name" { type = string }
+variable "lab_role_arn" { type = string }
+variable "subnet_id" { type = string }
+variable "availability_zone" { type = string }
+variable "db_sg_id" { type = string }
+variable "data_volume_gb" { type = number }
+variable "artifacts_bucket" { type = string }
+variable "server_rpm_url" { type = string }
+variable "mongosh_rpm_url" { type = string }
+variable "enable_snapshots" { type = bool }
+variable "ssm_prefix" { type = string }
+variable "aws_region" { type = string }

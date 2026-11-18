@@ -1,0 +1,13 @@
+# Estado remoto (opcional, recomendado para o grupo / plano de DR).
+# 1. Crie manualmente um bucket S3 com versionamento habilitado.
+# 2. Renomeie este arquivo para backend.tf e ajuste o nome do bucket.
+# 3. Rode: terraform init -migrate-state
+terraform {
+  backend "s3" {
+    bucket       = "petcare-cloud-tfstate-SEU-SUFIXO"
+    key          = "producao/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

@@ -1,0 +1,46 @@
+#!/bin/bash
+# Bootstrap das EC2 de aplicação (Amazon Linux 2023).
+# Instala Nginx + agente CodeDeploy. A aplicação em si chega pelo CodeDeploy.
+set -euxo pipefail
+exec > >(tee /var/log/petcare-bootstrap.log) 2>&1
+
+dnf install -y nginx ruby wget
+
+# Configuração consumida pelos hooks do CodeDeploy (after_install.sh)
+mkdir -p /etc/petcare
+cat > /etc/petcare/bootstrap.env <<CFG
+SSM_PREFIX=${ssm_prefix}
+AWS_REGION=${aws_region}
+CFG
+id petcare >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin petcare
+
+# Página provisória até o primeiro deploy (mantém o health check do ALB verde)
+mkdir -p /usr/share/nginx/petcare
+cat > /usr/share/nginx/petcare/index.html <<'HTML'
+<!doctype html><meta charset="utf-8"><title>PetCare</title>
+<h1>PetCare Cloud</h1><p>Infraestrutura pronta. Aguardando o primeiro deploy da pipeline GitLab CI/CD.</p>
+HTML
+cat > /etc/nginx/nginx.conf <<'NGX'
+user nginx;
+worker_processes auto;
+pid /run/nginx.pid;
+events { worker_connections 1024; }
+http {
+  include /etc/nginx/mime.types;
+  server_tokens off;
+  server {
+    listen 80 default_server;
+    root /usr/share/nginx/petcare;
+    location = /health { default_type application/json; return 200 '{"status":"ok","version":"bootstrap"}'; }
+    location / { try_files $uri /index.html; }
+  }
+}
+NGX
+systemctl enable --now nginx
+
+# Agente do CodeDeploy (bucket oficial da região)
+cd /tmp
+wget -q https://aws-codedeploy-${aws_region}.s3.${aws_region}.amazonaws.com/latest/install
+chmod +x ./install
+./install auto
+systemctl enable --now codedeploy-agent

@@ -1,0 +1,10 @@
+# Copie para terraform.tfvars (arquivo ignorado pelo Git) e preencha.
+aws_region         = "us-east-1"
+project_name       = "petcare-cloud"
+admin_cidrs        = ["SEU.IP.PUBLICO.AQUI/32"] # curl -s ifconfig.me
+notification_email = "grupo@exemplo.com"
+
+# Opcionais
+# app_instance_type      = "t3.small"
+# gitlab_instance_type   = "t3.large"
+# enable_mongo_snapshots = true
