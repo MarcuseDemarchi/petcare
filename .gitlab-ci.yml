@@ -1,0 +1,318 @@
+# =============================================================================
+# PetCare Cloud - Pipeline CI/CD (GitLab auto-hospedado)
+#
+#   test ──> security ──> package ──> deploy ──> notify
+#   │         │            │           │          └─ e-mail (SNS) sucesso / erro
+#   │         │            │           └─ S3 (release) -> CodeDeploy -> ASG + smoke test
+#   │         │            └─ ZIP + AppSpec, SBOM, scan do pacote, SHA-256, versão = commit
+#   │         └─ SAST (Semgrep), segredos (Gitleaks), SCA (Trivy), IaC (Checkov + validate)
+#   └─ testes unitários Go + build do frontend
+#
+# POLÍTICA DA PIPELINE
+#   - Sem segredos no Git ou no ZIP (Gitleaks + parâmetros SecureString no SSM)
+#   - Sem chaves AWS permanentes: jobs usam credenciais temporárias do Instance Profile
+#   - Jobs executados pelo Runner próprio; deploy só na branch protegida "main"
+#   - Gate: testes, segredos, SAST e CVEs ALTAS/CRÍTICAS bloqueiam a publicação
+# =============================================================================
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never # evita pipeline duplicada (branch + MR)
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - test
+  - security
+  - package
+  - deploy
+  - notify
+
+variables:
+  # Imagens com versão fixada (cadeia de suprimentos reprodutível)
+  GO_IMAGE: golang:1.26-alpine
+  NODE_IMAGE: node:24-alpine
+  SEMGREP_IMAGE: semgrep/semgrep:1.185.0
+  GITLEAKS_IMAGE: zricethezav/gitleaks:v8.30.1
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+  CHECKOV_IMAGE: bridgecrew/checkov:3.4.5
+  TERRAFORM_IMAGE: hashicorp/terraform:1.14
+  AWSCLI_IMAGE: amazon/aws-cli:2.31.39
+  RELEASE_NAME: petcare-${CI_COMMIT_SHORT_SHA}
+  GOPATH: ${CI_PROJECT_DIR}/.go
+  npm_config_cache: ${CI_PROJECT_DIR}/.npm
+
+default:
+  tags: [petcare]
+  interruptible: true
+
+.on_main: &on_main
+  - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+
+# ============================================================== 1. TESTES
+test:backend:
+  stage: test
+  image: $GO_IMAGE
+  cache:
+    key: go-${CI_COMMIT_REF_SLUG}
+    paths: [.go/pkg/mod/]
+  script:
+    - cd petcare/backend
+    - test -z "$(gofmt -l .)" || { echo "Código fora do padrão gofmt:"; gofmt -l .; exit 1; }
+    - go vet ./...
+    - go test -count=1 -coverprofile=coverage.out ./...
+    - go tool cover -func=coverage.out | tail -1
+    # Binário de produção, com a versão (commit) embutida
+    - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath
+      -ldflags "-s -w -X main.Version=${CI_COMMIT_SHORT_SHA}" -o petcare-backend .
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    expire_in: 7 days
+    paths: [petcare/backend/petcare-backend]
+
+test:frontend:
+  stage: test
+  image: $NODE_IMAGE
+  cache:
+    key: npm-${CI_COMMIT_REF_SLUG}
+    paths: [.npm/]
+  script:
+    - cd petcare/frontend
+    - npm ci --no-audit --no-fund
+    - npm run build
+  artifacts:
+    expire_in: 7 days
+    paths: [petcare/frontend/dist/]
+
+test:lambda:
+  stage: test
+  image: python:3.12-alpine
+  script:
+    - python -m py_compile petcare/lambda/index.py terraform/modules/data/mirror/index.py
+    - |
+      python - <<'PY'
+      import json, sys
+      sys.path.insert(0, "petcare/lambda")
+      import index
+      r = index.handler({"evento": "agendamento_criado", "agendamento_id": "t1", "servico": "banho", "pet_nome": "Rex"}, None)
+      assert r["statusCode"] == 200, r
+      r = index.handler({"Records": [{"messageId": "m1", "body": json.dumps({"agendamento_id": "t2", "status": "concluido"})}]}, None)
+      assert r["statusCode"] == 200, r
+      print("Lambda OK")
+      PY
+
+# ============================================================== 2. SEGURANÇA (gate)
+sast:semgrep:
+  stage: security
+  image: $SEMGREP_IMAGE
+  needs: []
+  variables:
+    SEMGREP_SRC_DIRECTORY: $CI_PROJECT_DIR # imagem oficial espera o código em /src
+  script:
+    - semgrep scan --config p/default --config p/golang --config p/react --config p/python
+      --metrics off
+      --error --gitlab-sast -o gl-sast-report.json
+  after_script:
+    - semgrep scan --config p/default --config p/golang --config p/react --config p/python
+      --metrics off --quiet || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    reports:
+      sast: gl-sast-report.json
+
+secrets:gitleaks:
+  stage: security
+  image:
+    name: $GITLEAKS_IMAGE
+    entrypoint: [""]
+  needs: []
+  variables:
+    GIT_DEPTH: 0
+  script:
+    # 1) Árvore atual: nenhum segredo pode existir no que será publicado
+    - gitleaks dir . --redact --no-banner --report-format json --report-path gitleaks-tree.json
+    # 2) Commits novos deste MR / push (histórico anterior já auditado - ver docs/AUDITORIA.md)
+    - |
+      if [ -n "$CI_MERGE_REQUEST_DIFF_BASE_SHA" ]; then RANGE="$CI_MERGE_REQUEST_DIFF_BASE_SHA..$CI_COMMIT_SHA";
+      elif [ -n "$CI_COMMIT_BEFORE_SHA" ] && [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then RANGE="$CI_COMMIT_BEFORE_SHA..$CI_COMMIT_SHA";
+      else RANGE="-1"; fi
+      echo "Escaneando commits: $RANGE"
+      gitleaks git . --log-opts="$RANGE" --redact --no-banner --report-format json --report-path gitleaks-commits.json
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths: [gitleaks-*.json]
+
+sca:trivy:
+  stage: security
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  needs: []
+  cache:
+    key: trivy-db
+    paths: [.trivycache/]
+  script:
+    # Dependências Go (go.mod) e npm (package-lock) - CVEs ALTAS/CRÍTICAS com correção bloqueiam
+    - trivy fs --cache-dir .trivycache --scanners vuln,secret --severity HIGH,CRITICAL
+      --ignore-unfixed --exit-code 1 petcare
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths: [trivy-deps.json]
+  after_script:
+    - trivy fs --cache-dir .trivycache --scanners vuln --format json -o trivy-deps.json petcare || true
+
+iac:checkov:
+  stage: security
+  image:
+    name: $CHECKOV_IMAGE
+    entrypoint: [""]
+  needs: []
+  script:
+    # Exceções só são aceitas com justificativa inline (#checkov:skip=ID:motivo)
+    - checkov -d terraform --framework terraform --compact --quiet --skip-path .terraform
+      -o cli -o junitxml --output-file-path console,checkov-junit.xml
+  artifacts:
+    when: always
+    expire_in: 30 days
+    reports:
+      junit: checkov-junit.xml
+
+iac:terraform:
+  stage: security
+  image:
+    name: $TERRAFORM_IMAGE
+    entrypoint: [""]
+  needs: []
+  script:
+    - cd terraform
+    - terraform fmt -check -recursive -diff
+    - terraform init -backend=false -input=false
+    - terraform validate
+
+# ============================================================== 3. PACOTE (artefato imutável)
+package:
+  stage: package
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  needs: [test:backend, test:frontend, test:lambda, sast:semgrep, secrets:gitleaks, sca:trivy, iac:checkov, iac:terraform]
+  cache:
+    key: trivy-db
+    paths: [.trivycache/]
+  script:
+    - apk add --no-cache zip >/dev/null
+    - B=build/bundle && mkdir -p $B/backend $B/frontend
+    - cp petcare/backend/petcare-backend $B/backend/
+    - cp -r petcare/frontend/dist/. $B/frontend/
+    - cp -r petcare/deploy/appspec.yml petcare/deploy/scripts petcare/deploy/config $B/
+    - echo "$CI_COMMIT_SHORT_SHA" > $B/VERSION
+    # Scan do pacote (binário Go compilado + estáticos): CVE alta/crítica bloqueia
+    - trivy rootfs --cache-dir .trivycache --scanners vuln,secret --severity HIGH,CRITICAL
+      --ignore-unfixed --exit-code 1 $B
+    # SBOM (CycloneDX) do que será publicado
+    - trivy rootfs --cache-dir .trivycache --format cyclonedx -o build/${RELEASE_NAME}.sbom.json $B
+    - (cd $B && find . -type f ! -name SHA256SUMS -exec sha256sum {} + | sort -k2 > SHA256SUMS)
+    - (cd $B && zip -qr ../${RELEASE_NAME}.zip .)
+    - (cd build && sha256sum ${RELEASE_NAME}.zip > ${RELEASE_NAME}.zip.sha256 && cat ${RELEASE_NAME}.zip.sha256)
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - build/${RELEASE_NAME}.zip
+      - build/${RELEASE_NAME}.zip.sha256
+      - build/${RELEASE_NAME}.sbom.json
+
+# ============================================================== 4. DEPLOY (somente main)
+deploy:producao:
+  stage: deploy
+  image:
+    name: $AWSCLI_IMAGE
+    entrypoint: [""]
+  needs: [package]
+  rules: *on_main
+  resource_group: producao # um deploy por vez
+  interruptible: false
+  environment:
+    name: producao
+    url: $APP_URL
+  script:
+    - aws sts get-caller-identity --query Arn --output text # credenciais temporárias (Instance Profile)
+    - cd build && sha256sum -c ${RELEASE_NAME}.zip.sha256
+    - SHA256=$(cut -d' ' -f1 ${RELEASE_NAME}.zip.sha256)
+    - KEY=releases/${RELEASE_NAME}.zip
+    - aws s3 cp ${RELEASE_NAME}.zip s3://${RELEASES_BUCKET}/${KEY}
+      --metadata "sha256=${SHA256},commit=${CI_COMMIT_SHA},pipeline=${CI_PIPELINE_ID}"
+    - aws s3 cp ${RELEASE_NAME}.sbom.json s3://${RELEASES_BUCKET}/sbom/${RELEASE_NAME}.sbom.json
+    - |
+      DEPLOY_ID=$(aws deploy create-deployment \
+        --application-name "$CODEDEPLOY_APP" --deployment-group-name "$CODEDEPLOY_GROUP" \
+        --s3-location "bucket=${RELEASES_BUCKET},key=${KEY},bundleType=zip" \
+        --description "commit ${CI_COMMIT_SHORT_SHA} | pipeline ${CI_PIPELINE_ID} | ${GITLAB_USER_LOGIN}" \
+        --query deploymentId --output text)
+      echo "Deployment: $DEPLOY_ID"
+      echo "DEPLOY_ID=$DEPLOY_ID" > ../deploy.env
+      aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID" || {
+        aws deploy get-deployment --deployment-id "$DEPLOY_ID" --query 'deploymentInfo.[status,errorInformation]'
+        exit 1; }
+  artifacts:
+    reports:
+      dotenv: deploy.env
+
+verify:producao:
+  stage: deploy
+  image: curlimages/curl:8.17.0
+  needs: [deploy:producao]
+  rules: *on_main
+  script:
+    # Smoke test pelo caminho real do usuário: Internet -> WAF -> ALB -> EC2 -> MongoDB
+    - |
+      for i in $(seq 1 20); do
+        V=$(curl -fsS "$APP_URL/api/version" || true)
+        echo "$V" | grep -q "\"$CI_COMMIT_SHORT_SHA\"" && break
+        sleep 6
+      done
+      echo "$V" | grep -q "\"$CI_COMMIT_SHORT_SHA\"" || { echo "Versão publicada não confere: $V"; exit 1; }
+    - curl -fsS "$APP_URL/health/ready"
+    - curl -fsS "$APP_URL/api/servicos" >/dev/null
+    - curl -fsS -o /dev/null "$APP_URL/"
+    # O WAF deve bloquear (403) um payload de SQL injection
+    - CODE=$(curl -s -o /dev/null -w '%{http_code}' "$APP_URL/api/pets?id=1%27%20OR%20%271%27=%271")
+    - echo "WAF SQLi -> HTTP $CODE"; test "$CODE" = "403"
+
+# ============================================================== 5. NOTIFICAÇÃO (SNS -> e-mail)
+.notify:
+  stage: notify
+  image:
+    name: $AWSCLI_IMAGE
+    entrypoint: [""]
+  interruptible: false
+
+notify:sucesso:
+  extends: .notify
+  when: on_success
+  script:
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        SUBJ="[PetCare] Deploy OK - ${CI_COMMIT_SHORT_SHA} em producao"
+      else
+        SUBJ="[PetCare] CI aprovada - ${CI_COMMIT_REF_NAME}"
+      fi
+      aws sns publish --topic-arn "$PIPELINE_TOPIC_ARN" --subject "$SUBJ" --message "$(printf \
+        'Pipeline %s APROVADA.\nBranch/MR: %s\nCommit: %s - %s\nAutor: %s\nDetalhes: %s\nAplicacao: %s' \
+        "$CI_PIPELINE_ID" "$CI_COMMIT_REF_NAME" "$CI_COMMIT_SHORT_SHA" "$CI_COMMIT_TITLE" \
+        "$GITLAB_USER_LOGIN" "$CI_PIPELINE_URL" "${APP_URL:-n/a}")"
+
+notify:falha:
+  extends: .notify
+  when: on_failure
+  script:
+    - |
+      aws sns publish --topic-arn "$PIPELINE_TOPIC_ARN" \
+        --subject "[PetCare] FALHA - alteracao recusada (${CI_COMMIT_REF_NAME})" \
+        --message "$(printf \
+        'Pipeline %s REPROVADA - a alteracao NAO foi publicada.\nBranch/MR: %s\nCommit: %s - %s\nAutor: %s\nVerifique os jobs com falha: %s' \
+        "$CI_PIPELINE_ID" "$CI_COMMIT_REF_NAME" "$CI_COMMIT_SHORT_SHA" "$CI_COMMIT_TITLE" \
+        "$GITLAB_USER_LOGIN" "$CI_PIPELINE_URL")"

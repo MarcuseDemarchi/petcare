@@ -1,0 +1,11 @@
+# Dependências e artefatos gerados (não são código do projeto)
+.go/
+.npm/
+.trivycache/
+node_modules/
+dist/
+build/
+.terraform/
+# IaC é analisada pelo Checkov (job iac:checkov)
+*.tf
+*.tftpl
