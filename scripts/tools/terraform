@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Terraform via Docker (hashicorp/terraform). Monta a raiz do repositório git
+# no mesmo caminho e as credenciais AWS (~/.aws) somente leitura.
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+TTY=""; [ -t 0 ] && [ -t 1 ] && TTY="-t"
+mkdir -p "$HOME/.aws"
+exec docker run --rm -i $TTY \
+  -u "$(id -u):$(id -g)" -e HOME=/tmp/home \
+  -e TF_PLUGIN_CACHE_DIR=/tmp/home/.tf-plugins -v terraform-plugins:/tmp/home/.tf-plugins \
+  -v "$HOME/.aws:/tmp/home/.aws:ro" \
+  -v "$ROOT:$ROOT" -w "$PWD" \
+  hashicorp/terraform:1.14 "$@"

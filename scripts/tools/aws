@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# AWS CLI via Docker (amazon/aws-cli) usando ~/.aws do usuário.
+TTY=""; [ -t 0 ] && [ -t 1 ] && TTY="-t"
+mkdir -p "$HOME/.aws"
+exec docker run --rm -i $TTY -u "$(id -u):$(id -g)" -e HOME=/tmp/home \
+  -v "$HOME/.aws:/tmp/home/.aws:ro" -v "$PWD:/aws" -w /aws \
+  amazon/aws-cli:2.31.39 "$@"
