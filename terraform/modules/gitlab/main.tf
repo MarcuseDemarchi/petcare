@@ -60,11 +60,14 @@ resource "aws_instance" "gitlab" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    aws_region   = var.aws_region
-    external_ip  = aws_eip.gitlab.public_ip
-    ssm_prefix   = var.ssm_prefix
-    ci_variables = var.ci_variables
+    bootstrap_b64 = base64encode(templatefile("${path.module}/bootstrap.sh.tftpl", {
+      aws_region   = var.aws_region
+      external_ip  = aws_eip.gitlab.public_ip
+      ssm_prefix   = var.ssm_prefix
+      ci_variables = var.ci_variables
+    }))
   })
+  user_data_replace_on_change = true # user_data só roda no 1º boot: mudança = nova instância
 
   tags = {
     Name = "${var.name}-gitlab"

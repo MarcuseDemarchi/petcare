@@ -1,101 +1,21 @@
 #!/bin/bash
-# Bootstrap do GitLab CE + GitLab Runner (Amazon Linux 2023) - totalmente automatizado.
-# Segredos (senha root e token de bootstrap) vêm do SSM Parameter Store.
+# O bootstrap do GitLab NÃO pode rodar dentro do cloud-init: o serviço gitlab-runsvdir
+# tem After=multi-user.target, que só é atingido quando o cloud-init termina -> deadlock.
+# Por isso o user_data apenas instala o script como serviço systemd e o dispara sem bloquear.
 set -euo pipefail
-exec > >(tee /var/log/petcare-gitlab-bootstrap.log) 2>&1
-REGION=${aws_region}
-EXTERNAL_URL="http://${external_ip}"
-TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-PRIV_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
-# A EC2 só tem internet após a associação do Elastic IP: aguarda conectividade
-for i in $(seq 1 60); do curl -fs -o /dev/null https://packages.gitlab.com && break; sleep 5; done
-ssm() { aws ssm get-parameter --region "$REGION" --name "$1" --with-decryption --query Parameter.Value --output text; }
+echo '${bootstrap_b64}' | base64 -d > /usr/local/sbin/petcare-gitlab-bootstrap.sh
+chmod 700 /usr/local/sbin/petcare-gitlab-bootstrap.sh
+cat > /etc/systemd/system/petcare-gitlab-bootstrap.service <<'UNIT'
+[Unit]
+Description=Bootstrap do GitLab CE + Runner (PetCare)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/petcare-gitlab-ready
 
-# ---------------------------------------------------------------- swap (8 GB RAM é o mínimo)
-if [ ! -f /swapfile ]; then
-  dd if=/dev/zero of=/swapfile bs=1M count=4096 && chmod 600 /swapfile && mkswap /swapfile
-  echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
-swapon -a || true
-
-# ---------------------------------------------------------------- GitLab CE
-if ! rpm -q gitlab-ce >/dev/null; then
-  dnf install -y policycoreutils-python-utils perl git docker jq
-  curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | bash
-  GITLAB_ROOT_PASSWORD="$(ssm ${ssm_prefix}/gitlab/root_password)" EXTERNAL_URL="$EXTERNAL_URL" dnf install -y gitlab-ce
-fi
-
-cat > /etc/gitlab/gitlab.rb <<RB
-external_url '$EXTERNAL_URL'
-# Ajustes para t3.large (8 GB)
-puma['worker_processes'] = 2
-sidekiq['concurrency'] = 10
-prometheus_monitoring['enable'] = false
-gitlab_rails['usage_ping_enabled'] = false
-gitlab_rails['gitlab_signup_enabled'] = false
-# Política: nada de segredos ou pacotes grandes no repositório
-gitlab_rails['max_attachment_size'] = 10
-nginx['client_max_body_size'] = '50m'
-RB
-gitlab-ctl reconfigure
-
-for i in $(seq 1 120); do curl -fs http://127.0.0.1/-/readiness >/dev/null && break; sleep 10; done
-
-# ---------------------------------------------------------------- Token de bootstrap (API)
-PAT=$(ssm ${ssm_prefix}/gitlab/bootstrap_token)
-gitlab-rails runner "
-u = User.find_by_username('root')
-unless PersonalAccessToken.find_by_token('$PAT')
-  t = u.personal_access_tokens.build(scopes: ['api'], name: 'bootstrap-terraform', expires_at: 30.days.from_now)
-  t.organization = Organizations::Organization.default_organization if defined?(Organizations::Organization) && t.respond_to?(:organization=)
-  t.set_token('$PAT')
-  t.save!
-end
-ApplicationSetting.current.update!(signup_enabled: false)
-"
-API="http://127.0.0.1/api/v4"
-H="PRIVATE-TOKEN: $PAT"
-
-# ---------------------------------------------------------------- Projeto + proteção de branch
-PID=$(curl -fs -H "$H" "$API/projects/root%2Fpetcare" | jq -r '.id // empty' || true)
-if [ -z "$PID" ]; then
-  PID=$(curl -fs -H "$H" -X POST "$API/projects" \
-    --data-urlencode "name=petcare" --data "visibility=private" \
-    --data "only_allow_merge_if_pipeline_succeeds=true" \
-    --data "only_allow_merge_if_all_discussions_are_resolved=true" \
-    --data "remove_source_branch_after_merge=true" \
-    --data "allow_merge_on_skipped_pipeline=false" \
-    --data "default_branch=main" | jq -r '.id')
-fi
-# main protegida: push direto só por maintainers (o script de bootstrap trava para "ninguém" após o 1º push)
-curl -s -H "$H" -X DELETE "$API/projects/$PID/protected_branches/main" >/dev/null || true
-curl -fs -H "$H" -X POST "$API/projects/$PID/protected_branches" \
-  --data "name=main" --data "push_access_level=40" --data "merge_access_level=40" --data "allow_force_push=false" >/dev/null
-
-# Variáveis de CI/CD (sem credenciais: a AWS é acessada pelo Instance Profile da EC2)
-%{ for k, v in ci_variables ~}
-curl -s -H "$H" -X DELETE "$API/projects/$PID/variables/${k}" >/dev/null || true
-curl -fs -H "$H" -X POST "$API/projects/$PID/variables" \
-  --data "key=${k}" --data-urlencode "value=${v.value}" --data "protected=${v.protected}" >/dev/null
-%{ endfor ~}
-
-# ---------------------------------------------------------------- GitLab Runner (executor Docker)
-systemctl enable --now docker
-if ! rpm -q gitlab-runner >/dev/null; then
-  curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.rpm.sh | bash
-  dnf install -y gitlab-runner
-fi
-if ! grep -q "petcare-runner" /etc/gitlab-runner/config.toml 2>/dev/null; then
-  RUNNER_TOKEN=$(curl -fs -H "$H" -X POST "$API/user/runners" \
-    --data "runner_type=instance_type" --data "description=petcare-runner" \
-    --data "tag_list=petcare,docker,aws" --data "run_untagged=true" | jq -r '.token')
-  gitlab-runner register --non-interactive \
-    --url "http://$PRIV_IP" --clone-url "http://$PRIV_IP" \
-    --token "$RUNNER_TOKEN" --name petcare-runner \
-    --executor docker --docker-image alpine:3.22 \
-    --docker-privileged=false --docker-volumes /cache
-  sed -i 's/^concurrent = .*/concurrent = 2/' /etc/gitlab-runner/config.toml
-  systemctl restart gitlab-runner
-fi
-echo "GitLab pronto em $EXTERNAL_URL"
-touch /var/lib/petcare-gitlab-ready
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/petcare-gitlab-bootstrap.sh
+TimeoutStartSec=0
+UNIT
+systemctl daemon-reload
+systemctl start --no-block petcare-gitlab-bootstrap.service
