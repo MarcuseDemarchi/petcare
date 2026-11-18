@@ -5,9 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -21,9 +19,6 @@ type Config struct {
 	SQSQueueURL        string
 	SNSTopicARN        string
 	LambdaFunctionName string
-	AWSAccessKeyID     string
-	AWSSecretKey       string
-	AWSSessionToken    string
 }
 
 type AWSClients struct {
@@ -35,37 +30,22 @@ type AWSClients struct {
 func Load() *Config {
 	return &Config{
 		Port:               getEnv("APP_PORT", "8080"),
-		MongoURI:           getEnv("MONGO_URI", "mongodb://mongodb:27017/petcare"),
+		MongoURI:           getEnv("MONGO_URI", "mongodb://localhost:27017/petcare"),
 		MongoDatabase:      getEnv("MONGO_DATABASE", "petcare"),
 		AWSRegion:          getEnv("AWS_REGION", "us-east-1"),
 		SQSQueueURL:        getEnv("SQS_QUEUE_URL", ""),
 		SNSTopicARN:        getEnv("SNS_TOPIC_ARN", ""),
 		LambdaFunctionName: getEnv("LAMBDA_FUNCTION_NAME", "petcare-cloud-processar-agendamento"),
-		AWSAccessKeyID:     getEnv("AWS_ACCESS_KEY_ID", ""),
-		AWSSecretKey:       getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		AWSSessionToken:    getEnv("AWS_SESSION_TOKEN", ""),
 	}
 }
 
+// NewAWSClients usa a cadeia padrão de credenciais do SDK.
+// Em produção as credenciais vêm do Instance Profile da EC2 (temporárias, via IMDSv2):
+// nenhuma chave de acesso permanente é configurada na aplicação.
 func NewAWSClients(cfg *Config) *AWSClients {
-	var awsCfg aws.Config
-	var err error
-
-	if cfg.AWSAccessKeyID != "" && cfg.AWSSecretKey != "" {
-		awsCfg, err = awsconfig.LoadDefaultConfig(context.Background(),
-			awsconfig.WithRegion(cfg.AWSRegion),
-			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-				cfg.AWSAccessKeyID,
-				cfg.AWSSecretKey,
-				cfg.AWSSessionToken,
-			)),
-		)
-	} else {
-		awsCfg, err = awsconfig.LoadDefaultConfig(context.Background(),
-			awsconfig.WithRegion(cfg.AWSRegion),
-		)
-	}
-
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithRegion(cfg.AWSRegion),
+	)
 	if err != nil {
 		log.Printf("Aviso: falha ao carregar configuração AWS: %v", err)
 		return &AWSClients{}
