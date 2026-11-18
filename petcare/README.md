@@ -61,7 +61,9 @@ petcare/
 │   │   ├── agendamentos.go    # CRUD + invocarLambda + publicarSNS/SQS
 │   │   ├── clientes.go        # CRUD + GetStats (aggregation MongoDB)
 │   │   └── pets.go            # CRUD
-│   ├── middleware/logger.go
+│   ├── middleware/            # logger + cabeçalhos de segurança
+│   ├── router.go              # rotas (testável)
+│   └── router_test.go         # testes executados na pipeline
 │   └── models/models.go
 ├── frontend/
 │   ├── src/
@@ -78,18 +80,10 @@ petcare/
 │   └── package.json
 ├── lambda/
 │   └── index.py               # Handler Python: invocação direta + SQS trigger
-├── k8s/
-│   ├── 00-namespace.yaml
-│   ├── 01-configmap.yaml
-│   ├── 02-secrets.yaml
-│   ├── 03-mongodb.yaml
-│   ├── 05-backend.yaml
-│   ├── 06-frontend.yaml
-│   └── 08-observability.yaml
-├── scripts/
-│   ├── deploy-k8s.sh
-│   ├── delete-k8s.sh
-│   └── status.sh
+├── deploy/                    # Pacote CodeDeploy (produção)
+│   ├── appspec.yml
+│   ├── scripts/               # hooks: stop, before/after install, start, validate
+│   └── config/                # nginx.conf, petcare-backend.service (systemd)
 ├── docker-compose.yml
 └── README.md
 ```
@@ -100,7 +94,9 @@ petcare/
 
 | Método | Rota | Descrição |
 |--------|------|-----------|
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Liveness (health check do ALB) |
+| `GET` | `/health/ready` | Readiness (verifica MongoDB) |
+| `GET` | `/api/version` | Versão publicada (commit) |
 | `GET` | `/api/pets` | Lista todos os pets |
 | `POST` | `/api/pets` | Cria pet |
 | `GET` | `/api/pets/:id` | Busca pet por ID |
@@ -122,42 +118,35 @@ petcare/
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
 | `APP_PORT` | `8080` | Porta do servidor |
-| `MONGO_URI` | `mongodb://mongodb:27017/petcare` | URI do MongoDB |
+| `MONGO_URI` | `mongodb://localhost:27017/petcare` | URI do MongoDB |
 | `MONGO_DATABASE` | `petcare` | Nome do banco |
 | `AWS_REGION` | `us-east-1` | Região AWS |
-| `AWS_ACCESS_KEY_ID` | — | Credencial AWS |
-| `AWS_SECRET_ACCESS_KEY` | — | Credencial AWS |
-| `AWS_SESSION_TOKEN` | — | Token de sessão (opcional) |
 | `SQS_QUEUE_URL` | — | URL da fila SQS |
 | `SNS_TOPIC_ARN` | — | ARN do tópico SNS |
 | `LAMBDA_FUNCTION_NAME` | `petcare-cloud-processar-agendamento` | Nome da função Lambda |
+
+> **Credenciais AWS:** a aplicação **não** aceita chaves fixas. Usa a cadeia padrão do SDK:
+> em produção, o Instance Profile da EC2 (credenciais temporárias); localmente, `~/.aws/credentials`.
+> Em produção as variáveis acima vêm do SSM Parameter Store (`/petcare-cloud/app/*`).
 
 ---
 
 ## Executar localmente (Docker Compose)
 
 ```bash
-# Copie e preencha as variáveis AWS (opcional — sem elas, SNS/SQS/Lambda são silenciados)
-cp .env.example .env   # se existir, ou exporte manualmente
-
+# Sem credenciais AWS, SNS/SQS/Lambda são apenas registrados em log
 docker compose up --build
 ```
 
 - Frontend: http://localhost:3000
 - Backend: http://localhost:8080
-- MongoDB: localhost:27017
 
 ---
 
-## Deploy no Kubernetes
+## Deploy em produção
 
-```bash
-# Preencha os secrets antes:
-# k8s/02-secrets.yaml → MONGO_URI, SQS_QUEUE_URL, SNS_TOPIC_ARN, AWS credentials
-
-bash scripts/deploy-k8s.sh
-bash scripts/status.sh
-```
+Feito automaticamente pela pipeline GitLab CI/CD → S3 → AWS CodeDeploy.
+Veja o [README principal](../README.md).
 
 ---
 
