@@ -1,11 +1,9 @@
-version: '3.8'
-
+# Ambiente de desenvolvimento local. Em produção a aplicação roda nas EC2 (CodeDeploy).
+# Credenciais AWS: use 'aws configure' / perfil local - nunca chaves no compose.
 services:
   mongodb:
     image: mongo:7
     container_name: petcare-mongodb
-    ports:
-      - "27017:27017"
     volumes:
       - mongo_data:/data/db
     networks:
@@ -29,9 +27,6 @@ services:
       MONGO_URI: "mongodb://mongodb:27017/petcare"
       MONGO_DATABASE: "petcare"
       AWS_REGION: "${AWS_REGION:-us-east-1}"
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
-      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
       SQS_QUEUE_URL: "${SQS_QUEUE_URL:-}"
       SNS_TOPIC_ARN: "${SNS_TOPIC_ARN:-}"
       LAMBDA_FUNCTION_NAME: "${LAMBDA_FUNCTION_NAME:-petcare-cloud-processar-agendamento}"
@@ -48,7 +43,7 @@ services:
       dockerfile: Dockerfile
     container_name: petcare-frontend
     ports:
-      - "3000:80"
+      - "3000:8080"
     depends_on:
       - backend
     networks:
