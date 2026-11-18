@@ -168,11 +168,7 @@ module "pipeline" {
 }
 
 module "data" {
-  source = "./modules/data"
-  providers = {
-    aws        = aws
-    aws.notags = aws.notags
-  }
+  source                = "./modules/data"
   name                  = local.name
   ami_id                = data.aws_ami.al2023.id
   instance_type         = var.mongo_instance_type

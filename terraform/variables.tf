@@ -92,7 +92,7 @@ variable "mongosh_rpm_url" {
 }
 
 variable "enable_mongo_snapshots" {
-  description = "Cria política DLM de snapshots diários do volume do MongoDB (usa a LabRole). Desative se o Lab negar permissão."
+  description = "Backup diário (snapshot EBS, retenção 7) do volume do MongoDB via Lambda + EventBridge."
   type        = bool
   default     = true
 }

@@ -1,7 +1,7 @@
 # =============================================================================
 # Camada de dados: MongoDB em EC2 na sub-rede ISOLADA (10.20.21.0/24)
 # - sem IP público, sem rota para internet, porta 27017 só a partir do SG-APP
-# - volume EBS criptografado + snapshots diários (DLM)
+# - volume EBS criptografado + snapshots diários (Lambda + EventBridge)
 # - senhas geradas pelo Terraform e guardadas como SecureString no SSM
 # =============================================================================
 
@@ -145,28 +145,65 @@ resource "aws_volume_attachment" "data" {
 }
 
 # ------------------------------------------------------------------ Backup (DR)
-resource "aws_dlm_lifecycle_policy" "mongo" {
-  provider           = aws.notags # Learner Lab nega dlm:TagResource
-  count              = var.enable_snapshots ? 1 : 0
-  description        = "Snapshots diarios do volume do MongoDB"
-  execution_role_arn = var.lab_role_arn
-  state              = "ENABLED"
+# Snapshot diário do volume de dados (retenção de 7). O DLM é bloqueado no Learner Lab,
+# então a rotina é feita por uma Lambda agendada pelo EventBridge.
+data "archive_file" "snapshot" {
+  type        = "zip"
+  source_file = "${path.module}/snapshot/index.py"
+  output_path = "${path.root}/.build/mongo-snapshot.zip"
+}
 
-  policy_details {
-    resource_types = ["VOLUME"]
-    target_tags    = { Snapshot = "diario" }
+resource "aws_lambda_function" "snapshot" {
+  #checkov:skip=CKV_AWS_117:Acessa apenas a API do EC2; sem necessidade de VPC
+  #checkov:skip=CKV_AWS_116:Falhas visiveis no CloudWatch; execucao diaria idempotente
+  #checkov:skip=CKV_AWS_115:Concorrencia reservada nao e permitida no Learner Lab
+  #checkov:skip=CKV_AWS_272:Code signing fora do escopo do Learner Lab
+  #checkov:skip=CKV_AWS_173:Variaveis de ambiente nao contem segredos
+  #checkov:skip=CKV_AWS_50:X-Ray desnecessario para rotina de backup
+  count            = var.enable_snapshots ? 1 : 0
+  function_name    = "${var.name}-mongo-backup"
+  role             = var.lab_role_arn
+  handler          = "index.handler"
+  runtime          = "python3.12"
+  timeout          = 120
+  filename         = data.archive_file.snapshot.output_path
+  source_code_hash = data.archive_file.snapshot.output_base64sha256
 
-    schedule {
-      name = "diario-7-dias"
-      create_rule {
-        interval      = 24
-        interval_unit = "HOURS"
-        times         = ["06:00"]
-      }
-      retain_rule {
-        count = 7
-      }
-      copy_tags = true
+  environment {
+    variables = {
+      VOLUME_ID = aws_ebs_volume.data.id
+      RETENTION = "7"
+      PROJECT   = var.name
     }
   }
+}
+
+resource "aws_cloudwatch_event_rule" "snapshot" {
+  count               = var.enable_snapshots ? 1 : 0
+  name                = "${var.name}-mongo-backup-diario"
+  description         = "Snapshot diario do volume do MongoDB (06:00 UTC)"
+  schedule_expression = "cron(0 6 * * ? *)"
+}
+
+resource "aws_cloudwatch_event_target" "snapshot" {
+  count = var.enable_snapshots ? 1 : 0
+  rule  = aws_cloudwatch_event_rule.snapshot[0].name
+  arn   = aws_lambda_function.snapshot[0].arn
+}
+
+resource "aws_lambda_permission" "snapshot" {
+  count         = var.enable_snapshots ? 1 : 0
+  statement_id  = "AllowEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.snapshot[0].function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.snapshot[0].arn
+}
+
+# Primeiro backup já no apply (evidência para a auditoria)
+resource "aws_lambda_invocation" "first_snapshot" {
+  count         = var.enable_snapshots ? 1 : 0
+  function_name = aws_lambda_function.snapshot[0].function_name
+  input         = jsonencode({ origem = "terraform-apply" })
+  depends_on    = [aws_volume_attachment.data]
 }

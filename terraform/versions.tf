@@ -17,12 +17,6 @@ terraform {
   }
 }
 
-# Provider sem tags padrão: o Learner Lab nega dlm:TagResource (snapshots do MongoDB)
-provider "aws" {
-  alias  = "notags"
-  region = var.aws_region
-}
-
 provider "aws" {
   region = var.aws_region
 
