@@ -8,68 +8,11 @@ resource "random_id" "suffix" {
 }
 
 # ------------------------------------------------------------------ S3 releases
-resource "aws_s3_bucket" "releases" {
-  #checkov:skip=CKV_AWS_144:Replicacao entre regioes fora do escopo/orcamento do Learner Lab
-  #checkov:skip=CKV_AWS_145:SSE-S3 (AES256) usado; KMS CMK nao e garantido no Learner Lab
-  #checkov:skip=CKV2_AWS_62:Notificacoes de evento nao necessarias; deploy e disparado pela pipeline
-  #checkov:skip=CKV_AWS_18:Auditoria de acesso coberta pelo CloudTrail da conta
-  bucket        = "${var.name}-releases-${random_id.suffix.hex}"
-  force_destroy = true
-  tags          = { Name = "${var.name}-releases" }
-}
-
-resource "aws_s3_bucket_versioning" "releases" {
-  bucket = aws_s3_bucket.releases.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "releases" {
-  bucket = aws_s3_bucket.releases.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "releases" {
-  bucket                  = aws_s3_bucket.releases.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "releases" {
-  bucket = aws_s3_bucket.releases.id
-  rule {
-    id     = "versoes-antigas"
-    status = "Enabled"
-    filter {}
-    noncurrent_version_expiration {
-      noncurrent_days = 90
-    }
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-  }
-}
-
-resource "aws_s3_bucket_policy" "releases" {
-  bucket = aws_s3_bucket.releases.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid       = "SomenteTLS"
-      Effect    = "Deny"
-      Principal = "*"
-      Action    = "s3:*"
-      Resource  = [aws_s3_bucket.releases.arn, "${aws_s3_bucket.releases.arn}/*"]
-      Condition = { Bool = { "aws:SecureTransport" = "false" } }
-    }]
-  })
+module "releases_bucket" {
+  source                = "../s3-bucket"
+  bucket_name           = "${var.name}-releases-${random_id.suffix.hex}"
+  manager_function_name = var.bucket_manager
+  noncurrent_days       = 90 # versões anteriores dos releases ficam 90 dias (rollback/auditoria)
 }
 
 # ------------------------------------------------------------------ SNS (notificações)

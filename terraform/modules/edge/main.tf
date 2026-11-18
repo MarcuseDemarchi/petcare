@@ -62,7 +62,7 @@ resource "aws_lb_listener" "http" {
 # ------------------------------------------------------------------ WAF
 resource "aws_wafv2_web_acl" "this" {
   name        = "${var.name}-waf"
-  description = "Protecao do ALB: OWASP (SQLi/XSS), reputacao de IP, Log4j e rate limiting"
+  description = "Protecao do ALB - OWASP, SQLi, XSS, reputacao de IP, Log4j e rate limiting"
   scope       = "REGIONAL"
 
   default_action {
@@ -180,101 +180,39 @@ resource "random_id" "waf_logs" {
   byte_length = 4
 }
 
-resource "aws_s3_bucket" "waf_logs" {
-  #checkov:skip=CKV_AWS_144:Replicacao entre regioes fora do escopo/orcamento do Learner Lab
-  #checkov:skip=CKV_AWS_145:SSE-S3 (AES256) usado; KMS CMK nao e garantido no Learner Lab
-  #checkov:skip=CKV_AWS_18:Este e o proprio bucket de logs
-  #checkov:skip=CKV2_AWS_62:Notificacoes de evento desnecessarias para bucket de logs
-  bucket        = "aws-waf-logs-${var.name}-${random_id.waf_logs.hex}"
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_public_access_block" "waf_logs" {
-  bucket                  = aws_s3_bucket.waf_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_versioning" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  rule {
-    id     = "expira-logs"
-    status = "Enabled"
-    filter {}
-    expiration {
-      days = 90
-    }
-    noncurrent_version_expiration {
-      noncurrent_days = 30
-    }
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-  }
+module "waf_logs_bucket" {
+  source                = "../s3-bucket"
+  bucket_name           = "aws-waf-logs-${var.name}-${random_id.waf_logs.hex}"
+  manager_function_name = var.bucket_manager
+  expiration_days       = 90
+  policy_statements = [
+    {
+      Sid       = "AWSLogDeliveryWrite"
+      Effect    = "Allow"
+      Principal = { Service = "delivery.logs.amazonaws.com" }
+      Action    = "s3:PutObject"
+      Resource  = "arn:aws:s3:::aws-waf-logs-${var.name}-${random_id.waf_logs.hex}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+      Condition = {
+        StringEquals = {
+          "s3:x-amz-acl"      = "bucket-owner-full-control"
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+      }
+    },
+    {
+      Sid       = "AWSLogDeliveryAclCheck"
+      Effect    = "Allow"
+      Principal = { Service = "delivery.logs.amazonaws.com" }
+      Action    = "s3:GetBucketAcl"
+      Resource  = "arn:aws:s3:::aws-waf-logs-${var.name}-${random_id.waf_logs.hex}"
+      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
+    },
+  ]
 }
 
 data "aws_caller_identity" "current" {}
 
-resource "aws_s3_bucket_policy" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "AWSLogDeliveryWrite"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.waf_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
-        Condition = {
-          StringEquals = {
-            "s3:x-amz-acl"      = "bucket-owner-full-control"
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-          }
-        }
-      },
-      {
-        Sid       = "AWSLogDeliveryAclCheck"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action    = "s3:GetBucketAcl"
-        Resource  = aws_s3_bucket.waf_logs.arn
-        Condition = {
-          StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id }
-        }
-      },
-      {
-        Sid       = "SomenteTLS"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource  = [aws_s3_bucket.waf_logs.arn, "${aws_s3_bucket.waf_logs.arn}/*"]
-        Condition = { Bool = { "aws:SecureTransport" = "false" } }
-      }
-    ]
-  })
-}
-
 resource "aws_wafv2_web_acl_logging_configuration" "this" {
-  log_destination_configs = [aws_s3_bucket.waf_logs.arn]
+  log_destination_configs = [module.waf_logs_bucket.arn]
   resource_arn            = aws_wafv2_web_acl.this.arn
-  depends_on              = [aws_s3_bucket_policy.waf_logs]
 }

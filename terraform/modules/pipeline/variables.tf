@@ -3,3 +3,4 @@ variable "lab_role_arn" { type = string }
 variable "asg_name" { type = string }
 variable "target_group_name" { type = string }
 variable "notification_email" { type = string }
+variable "bucket_manager" { type = string }

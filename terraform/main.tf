@@ -39,107 +39,72 @@ data "aws_ami" "al2023" {
   }
 }
 
+# ---------------------------------------------------------------- Gerenciador de buckets S3
+# O Learner Lab nega s3:GetBucketObjectLockConfiguration (SCP), chamada sempre feita
+# pelo recurso aws_s3_bucket. Os buckets são criados/removidos por esta Lambda.
+data "archive_file" "bucket_manager" {
+  type        = "zip"
+  source_file = "${path.module}/modules/s3-bucket/manager/index.py"
+  output_path = "${path.root}/.build/s3-bucket-manager.zip"
+}
+
+resource "aws_lambda_function" "bucket_manager" {
+  #checkov:skip=CKV_AWS_117:Funcao de provisionamento chamada pelo Terraform; acessa apenas a API do S3
+  #checkov:skip=CKV_AWS_116:Invocada de forma sincrona pelo Terraform; DLQ nao se aplica
+  #checkov:skip=CKV_AWS_115:Concorrencia reservada nao e permitida no Learner Lab
+  #checkov:skip=CKV_AWS_272:Code signing fora do escopo do Learner Lab
+  #checkov:skip=CKV_AWS_50:X-Ray desnecessario para funcao de provisionamento
+  function_name    = "${local.name}-s3-bucket-manager"
+  role             = data.aws_iam_role.lab.arn
+  handler          = "index.handler"
+  runtime          = "python3.12"
+  timeout          = 900
+  filename         = data.archive_file.bucket_manager.output_path
+  source_code_hash = data.archive_file.bucket_manager.output_base64sha256
+}
+
 # ---------------------------------------------------------------- Bucket de logs (ALB + VPC Flow Logs)
 resource "random_id" "logs" {
   byte_length = 4
 }
 
-resource "aws_s3_bucket" "logs" {
-  #checkov:skip=CKV_AWS_144:Replicacao entre regioes fora do escopo/orcamento do Learner Lab
-  #checkov:skip=CKV_AWS_145:Entrega de logs do ALB exige SSE-S3 (nao suporta KMS)
-  #checkov:skip=CKV_AWS_18:Este e o proprio bucket de logs de acesso
-  #checkov:skip=CKV2_AWS_62:Notificacoes de evento desnecessarias para bucket de logs
-  bucket        = "${local.name}-logs-${random_id.logs.hex}"
-  force_destroy = true
-}
-
-resource "aws_s3_bucket_public_access_block" "logs" {
-  bucket                  = aws_s3_bucket.logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
-  bucket = aws_s3_bucket.logs.id
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_versioning" "logs" {
-  bucket = aws_s3_bucket.logs.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "logs" {
-  bucket = aws_s3_bucket.logs.id
-  rule {
-    id     = "expira-logs"
-    status = "Enabled"
-    filter {}
-    expiration {
-      days = 90
-    }
-    noncurrent_version_expiration {
-      noncurrent_days = 30
-    }
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-  }
-}
-
 data "aws_elb_service_account" "this" {}
 
-resource "aws_s3_bucket_policy" "logs" {
-  bucket = aws_s3_bucket.logs.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "ALBAccessLogs"
-        Effect    = "Allow"
-        Principal = { AWS = data.aws_elb_service_account.this.arn }
-        Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.logs.arn}/alb/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
-      },
-      {
-        Sid       = "FlowLogsWrite"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.logs.arn}/vpc-flow-logs/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
-        Condition = {
-          StringEquals = {
-            "s3:x-amz-acl"      = "bucket-owner-full-control"
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-          }
+module "logs_bucket" {
+  source                = "./modules/s3-bucket"
+  bucket_name           = "${local.name}-logs-${random_id.logs.hex}"
+  manager_function_name = aws_lambda_function.bucket_manager.function_name
+  expiration_days       = 90
+  policy_statements = [
+    {
+      Sid       = "ALBAccessLogs"
+      Effect    = "Allow"
+      Principal = { AWS = data.aws_elb_service_account.this.arn }
+      Action    = "s3:PutObject"
+      Resource  = "arn:aws:s3:::${local.name}-logs-${random_id.logs.hex}/alb/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+    },
+    {
+      Sid       = "FlowLogsWrite"
+      Effect    = "Allow"
+      Principal = { Service = "delivery.logs.amazonaws.com" }
+      Action    = "s3:PutObject"
+      Resource  = "arn:aws:s3:::${local.name}-logs-${random_id.logs.hex}/vpc-flow-logs/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+      Condition = {
+        StringEquals = {
+          "s3:x-amz-acl"      = "bucket-owner-full-control"
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
         }
-      },
-      {
-        Sid       = "FlowLogsAclCheck"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action    = ["s3:GetBucketAcl", "s3:ListBucket"]
-        Resource  = aws_s3_bucket.logs.arn
-        Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
-      },
-      {
-        Sid       = "SomenteTLS"
-        Effect    = "Deny"
-        Principal = "*"
-        Action    = "s3:*"
-        Resource  = [aws_s3_bucket.logs.arn, "${aws_s3_bucket.logs.arn}/*"]
-        Condition = { Bool = { "aws:SecureTransport" = "false" } }
       }
-    ]
-  })
+    },
+    {
+      Sid       = "FlowLogsAclCheck"
+      Effect    = "Allow"
+      Principal = { Service = "delivery.logs.amazonaws.com" }
+      Action    = ["s3:GetBucketAcl", "s3:ListBucket"]
+      Resource  = "arn:aws:s3:::${local.name}-logs-${random_id.logs.hex}"
+      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
+    },
+  ]
 }
 
 # ---------------------------------------------------------------- Módulos
@@ -148,8 +113,7 @@ module "network" {
   name                 = local.name
   vpc_cidr             = var.vpc_cidr
   azs                  = local.azs
-  flow_logs_bucket_arn = aws_s3_bucket.logs.arn
-  depends_on           = [aws_s3_bucket_policy.logs]
+  flow_logs_bucket_arn = module.logs_bucket.arn
 }
 
 module "security" {
@@ -166,9 +130,9 @@ module "edge" {
   vpc_id            = module.network.vpc_id
   public_subnet_ids = module.network.public_subnet_ids
   alb_sg_id         = module.security.alb_sg_id
-  logs_bucket       = aws_s3_bucket.logs.bucket
+  logs_bucket       = module.logs_bucket.bucket
   waf_rate_limit    = var.waf_rate_limit
-  depends_on        = [aws_s3_bucket_policy.logs]
+  bucket_manager    = aws_lambda_function.bucket_manager.function_name
 }
 
 module "messaging" {
@@ -200,10 +164,15 @@ module "pipeline" {
   asg_name           = module.compute.asg_name
   target_group_name  = module.edge.target_group_name
   notification_email = var.notification_email
+  bucket_manager     = aws_lambda_function.bucket_manager.function_name
 }
 
 module "data" {
-  source                = "./modules/data"
+  source = "./modules/data"
+  providers = {
+    aws        = aws
+    aws.notags = aws.notags
+  }
   name                  = local.name
   ami_id                = data.aws_ami.al2023.id
   instance_type         = var.mongo_instance_type

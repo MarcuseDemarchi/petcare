@@ -27,7 +27,7 @@ output "releases_bucket" { value = module.pipeline.releases_bucket }
 output "codedeploy_app" { value = module.pipeline.codedeploy_app }
 output "codedeploy_group" { value = module.pipeline.codedeploy_group }
 output "waf_logs_bucket" { value = module.edge.waf_logs_bucket }
-output "logs_bucket" { value = aws_s3_bucket.logs.bucket }
+output "logs_bucket" { value = module.logs_bucket.bucket }
 output "vpc_id" { value = module.network.vpc_id }
 output "nat_public_ips" { value = module.network.nat_public_ips }
 
