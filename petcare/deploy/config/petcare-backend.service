@@ -1,0 +1,26 @@
+[Unit]
+Description=PetCare Backend API (Go)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=petcare
+Group=petcare
+EnvironmentFile=/etc/petcare/app.env
+ExecStart=/opt/petcare/bin/petcare-backend
+Restart=on-failure
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

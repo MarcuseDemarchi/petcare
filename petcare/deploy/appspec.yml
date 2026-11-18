@@ -1,0 +1,49 @@
+# AppSpec do AWS CodeDeploy - deploy in-place nas EC2 do Auto Scaling Group.
+# O pacote ZIP é montado pela pipeline (stage "package") com esta estrutura:
+#   appspec.yml | backend/ | frontend/ | config/ | scripts/ | VERSION | SHA256SUMS
+version: 0.0
+os: linux
+files:
+  - source: backend
+    destination: /opt/petcare/bin
+  - source: frontend
+    destination: /usr/share/nginx/petcare
+  - source: config
+    destination: /opt/petcare/config
+  - source: VERSION
+    destination: /opt/petcare
+file_exists_behavior: OVERWRITE
+permissions:
+  - object: /opt/petcare/bin
+    owner: root
+    group: petcare
+    mode: 750
+    type:
+      - file
+  - object: /usr/share/nginx/petcare
+    owner: root
+    group: nginx
+    mode: 644
+    type:
+      - file
+hooks:
+  ApplicationStop:
+    - location: scripts/application_stop.sh
+      timeout: 60
+      runas: root
+  BeforeInstall:
+    - location: scripts/before_install.sh
+      timeout: 120
+      runas: root
+  AfterInstall:
+    - location: scripts/after_install.sh
+      timeout: 180
+      runas: root
+  ApplicationStart:
+    - location: scripts/application_start.sh
+      timeout: 120
+      runas: root
+  ValidateService:
+    - location: scripts/validate_service.sh
+      timeout: 180
+      runas: root
