@@ -41,10 +41,19 @@ git push "$REMOTE" HEAD:main
 git remote get-url gitlab >/dev/null 2>&1 || git remote add gitlab "$GITLAB_URL/root/petcare.git"
 
 echo ">> Travando a branch main (push direto: ninguém | merge: maintainers via MR aprovado)..."
-curl -fs -H "PRIVATE-TOKEN: $TOKEN" -X DELETE "$API/projects/$PROJECT/protected_branches/main" >/dev/null || true
-curl -fs -H "PRIVATE-TOKEN: $TOKEN" -X POST "$API/projects/$PROJECT/protected_branches" \
-  --data "name=main" --data "push_access_level=0" --data "merge_access_level=40" \
-  --data "allow_force_push=false" >/dev/null
+# (repete: logo após o push o GitLab pode ainda estar processando a branch)
+for i in $(seq 1 10); do
+  curl -s -H "PRIVATE-TOKEN: $TOKEN" -X DELETE "$API/projects/$PROJECT/protected_branches/main" >/dev/null || true
+  curl -s -H "PRIVATE-TOKEN: $TOKEN" -X POST "$API/projects/$PROJECT/protected_branches" \
+    --data "name=main" --data "push_access_level=0" --data "merge_access_level=40" \
+    --data "allow_force_push=false" >/dev/null || true
+  if curl -fs -H "PRIVATE-TOKEN: $TOKEN" "$API/projects/$PROJECT/protected_branches/main" |
+     grep -q '"push_access_levels":\[{[^]]*"access_level":0'; then
+    echo "   main protegida (push direto: ninguém)."; break
+  fi
+  [ "$i" = 10 ] && { echo "ERRO: não foi possível proteger a main. Ajuste em Settings > Repository > Protected branches."; exit 1; }
+  sleep 5
+done
 
 cat <<MSG
 
